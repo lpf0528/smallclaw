@@ -1,9 +1,13 @@
 import asyncio
+import logging
 
 from abc import ABC
 import json
 import threading
 from typing import Any
+
+from .message_bus import InboundMessage, InboundMessageType
+logger = logging.getLogger(__name__)
 
 
 class FeishuChannel(ABC):
@@ -38,6 +42,10 @@ class FeishuChannel(ABC):
         self._main_loop: asyncio.AbstractEventLoop | None = None
         # 运行飞书 WebSocket 客户端的子线程
         self._thread: threading.Thread | None = None
+        # 保存所有并发任务的引用，用于取消
+        self._background_tasks: set[asyncio.Task] = set()
+        # 回复的卡片消息
+        self._running_card_ids: dict[str, str] = {}
 
         self.config = config
         self._running = False
@@ -148,36 +156,119 @@ class FeishuChannel(ABC):
         """
 
         message = event.event.message
-        content = json.loads(message.content)
-        print(f'content: {content}')
-
-        robot_id = getattr(message, 'robot_id', None)
+        # 当该消息是在飞书线程中对某条消息的回复时，会设置 `root_id`。
+        root_id = getattr(message, 'root_id', None)
         msg_id = message.message_id
-        msg_id = robot_id or msg_id
-        # 消息所在的群/会话 ID，用于后续回复消息时指定目标
-        chat_id = message.chat_id
+        sender_id = event.event.sender.sender_id.open_id
 
-        # 跨线程安全地将协程提交给主线程的事件循环执行。
-        # 这是从非 asyncio 线程调用异步代码的标准做法：
-        # - asyncio.run_coroutine_threadsafe() 是线程安全的
-        # - 返回一个 concurrent.futures.Future（非 asyncio.Future）
-        fut = asyncio.run_coroutine_threadsafe(
-            self._prepare_inbound(msg_id, chat_id, {}),
-            self._main_loop,
+        content = json.loads(message.content)
+        text = content.get("text", "").strip()
+        if text.startswith("/"):
+            msg_type = InboundMessageType.COMMAND
+        else:
+            msg_type = InboundMessageType.CHAT
+
+        inbound = InboundMessage(
+            channel_name=self.name,
+            chat_id=message.chat_id,  # 消息所在的群/会话 ID，用于后续回复消息时指定目标
+            user_id=sender_id,
+            text=text,
+            msg_type=msg_type,
+            thread_ts=msg_id,
+            metadata={"message_id": msg_id, "root_id": root_id},
         )
-        # 为 Future 添加完成回调（无论成功/失败/取消均会触发），用于日志记录。
-        fut.add_done_callback(lambda f, mid=msg_id: print(f'prepare inbound {mid} done'))
+        inbound.topic_id = root_id or msg_id
 
-    async def _prepare_inbound(self, msg_id: str, content: dict[str, Any]) -> None:
-        """在主线程事件循环中并发处理收到的消息：
+        if self._main_loop and self._main_loop.is_running():
+            # 跨线程安全地将协程提交给主线程的事件循环执行。
+            # 这是从非 asyncio 线程调用异步代码的标准做法：
+            # - asyncio.run_coroutine_threadsafe() 是线程安全的
+            # - 返回一个 concurrent.futures.Future（非 asyncio.Future）
+            fut = asyncio.run_coroutine_threadsafe(
+                self._prepare_inbound(msg_id, inbound),
+                self._main_loop,
+            )
+            # 为 Future 添加完成回调（无论成功/失败/取消均会触发），用于日志记录。
+            fut.add_done_callback(lambda f, mid=msg_id: print(f'处理入站消息 {mid} 完成'))
+
+    async def _prepare_inbound(self, msg_id: str, inbound: InboundMessage) -> None:
+        """在主线程事件循环中并发处理收到的入站消息：
         """
         # create_task() 将协程包装为 Task 并立即调度，不等待其完成就继续往下执行。
+        # 1、发送一个 "OK" 反应，确认消息已收到。
         rection_task = asyncio.create_task(self._add_reaction(msg_id, 'OK'))
-        rection_task.add_done_callback(lambda f: print(f'add reaction to {msg_id}'))
+        self._track_background_task(rection_task, name="add_reaction", msg_id=msg_id)
+        #
+        self._ensure_running_card_started(msg_id)
+
+    def _ensure_running_card_started(self, msg_id: str, text: str) -> None:
+        """确保卡片消息回复
+        """
+        running_card_id = self._running_card_ids.get(msg_id, None)
+        if running_card_id:
+            # 已存在卡片消息 ID，无需重复回复。
+            return None
+
+        # TODO
+
+    async def _reply_card(self, msg_id: str, text: str) -> str | None:
+        """回复卡片消息，返回回复消息 ID。
+        https: // open.feishu.cn / document / server - docs / im - v1 / message / reply?appId = cli_a93e6e5177b99cd3
+        """
+        content = self._create_card_content(text)
+        request = self._CreateMessageRequest.builder().message_id(msg_id) \
+            .request_body(self._CreateMessageRequestBody.builder()
+                          .msg_type("interactive")  # 卡片
+                          .content(content)
+                          .reply_in_thread(True)  # true 时将以话题形式回复。
+                          .build()) \
+            .build()
+
+        response = await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
+        response_data = getattr(response, "data", None)
+        return getattr(response_data, "message_id", None)
+
+    @staticmethod
+    def _create_card_content(text: str) -> str:
+        """创建卡片消息内容
+        https: // open.feishu.cn / document / feishu - cards / card - json - structure
+        """
+        return json.dumps({
+            "config": {"wide_screen_mode": True, "update_multi": True},
+            "elements": [{"tag": "markdown", "content": text}],
+        })
+
+    async def _track_background_task(self, task: asyncio.Task, name: str, msg_id: str) -> None:
+        """追踪后台任务
+        """
+        # 记录任务，用于后续完成、取消时释放资源。
+        self._background_tasks.add(task)
+        # 为任务添加完成回调
+        task.add_done_callback(lambda task, name, mid=msg_id: self._background_task_done_callback(task, name, mid))
+
+    async def _background_task_done_callback(self, task: asyncio.Task, name: str, msg_id: str):
+        """后台任务完成回调
+        """
+        # 任务完成时，从记录中移除它，释放资源。
+        self._background_tasks.discard(task)  # remove： 会抛出异常，discard： 不会抛出异常。
+        self._log_task_error(task, name, msg_id)
+
+    @staticmethod
+    def _log_task_error(task: asyncio.Task, name: str, msg_id: str):
+        """记录后台任务执行的错误日志
+        """
+        try:
+            exc = task.exception()
+            if exc:
+                logger.error(f"[FeishuChannel] 任务 {name} {msg_id} 执行异常 : {exc}")
+        except asyncio.CancelledError:
+            logger.info(f"[FeishuChannel] 任务 {name} {msg_id} 已取消")
+        except Exception:
+            pass
 
     async def _add_reaction(self, msg_id: str, emoji_type: str = 'THUMBSUP') -> None:
         """通过飞书 REST API 给指定消息添加 Emoji 表情回应。
-        https://open.feishu.cn/document/server-docs/im-v1/message-reaction/create?appId=cli_a93e6e5177b99cd3
+        https: // open.feishu.cn / document / server - docs / im - v1 / message - reaction / create?appId = cli_a93e6e5177b99cd3
         """
         request = self._CreateMessageReactionRequest.builder().message_id(msg_id).request_body(
             self._CreateMessageReactionRequestBody.builder().reaction_type(
