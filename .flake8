@@ -1,0 +1,13 @@
+[flake8]
+# 基本配置
+max-line-length = 88
+
+# 忽略的规则
+ignore = E501, E203, W503
+
+# 排除的目录
+exclude = .git, __pycache__, build, dist, venv, .venv
+
+# 包含的文件扩展名
+
+# 启用的扩展
