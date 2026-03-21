@@ -6,6 +6,6 @@
     ],
     "env": ".env",
     "graphs": {
-        "lead_agent": "lead_agent.agent:make_lead_agent"
+        "lead_agent": "lead_agent:make_lead_agent"
     }
 }

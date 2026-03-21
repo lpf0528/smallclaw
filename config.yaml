@@ -1,0 +1,37 @@
+# client.runs.stream(
+#       thread_id, 
+#       assistant_id, -- session.assistant_id
+#       input={
+#           'messages': [{
+#               'role': 'user',
+#               'content': msg.text
+#           }]
+#       },
+#       config=run_config,  -- session.config
+#       context=run_context, -- session.context
+#       stream_mode=['messages-tuple', 'values']
+#   )
+
+channels:
+  langgraph_url: http://localhost:2024
+  gateway_url: http://localhost:8001
+
+  session: 
+    assistant_id: lead_agent
+    
+    # 所有移动端渠道共用的全局 session 默认值
+    config:
+      # 资源限制 
+      recursion_limit: 100
+    context:
+      # 上下文配置
+      thinking_enabled: true
+      is_plan_mode: false
+      subagent_enabled: false
+
+  feishu:
+    enable: true
+    app_id: $FEISHU_APP_ID
+    app_secret: $FEISHU_APP_SECRET
+
+

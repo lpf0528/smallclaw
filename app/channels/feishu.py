@@ -6,7 +6,7 @@ import json
 import threading
 from typing import Any
 
-from .message_bus import InboundMessage, InboundMessageType
+from .message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage
 logger = logging.getLogger(__name__)
 
 
@@ -36,7 +36,8 @@ class FeishuChannel(ABC):
             └── _on_message() → run_coroutine_threadsafe() → 主线程 loop
     """
 
-    def __init__(self, config: dict[str, Any]) -> None:
+    def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
+        self.bus = bus
         self.name = 'feishu'
         # 保存主线程的事件循环引用，供子线程跨线程提交协程使用
         self._main_loop: asyncio.AbstractEventLoop | None = None
@@ -46,6 +47,7 @@ class FeishuChannel(ABC):
         self._background_tasks: set[asyncio.Task] = set()
         # 回复的卡片消息
         self._running_card_ids: dict[str, str] = {}
+        self._running_card_tasks: dict[str, asyncio.Task.Task] = {}
 
         self.config = config
         self._running = False
@@ -55,6 +57,10 @@ class FeishuChannel(ABC):
         self._CreateMessageReactionRequestBody = None
         self._CreateMessageRequest = None
         self._CreateMessageRequestBody = None
+        self._ReplyMessageRequest = None
+        self._ReplyMessageRequestBody = None
+        self._PatchMessageRequest = None
+        self._PatchMessageRequestBody = None
         self._Emoji = None
 
     @property
@@ -69,13 +75,12 @@ class FeishuChannel(ABC):
         # 幂等检查
         if self.is_running:
             return
-
-        if self.is_running:
-            return
-
         try:
             import lark_oapi as lark
-            from lark_oapi.api.im.v1 import CreateMessageReactionRequest, CreateMessageReactionRequestBody, Emoji, CreateMessageRequest, CreateMessageRequestBody
+            from lark_oapi.api.im.v1 import (
+                CreateMessageReactionRequest, CreateMessageReactionRequestBody, Emoji, CreateMessageRequest, CreateMessageRequestBody,
+                ReplyMessageRequest, ReplyMessageRequestBody, PatchMessageRequest, PatchMessageRequestBody
+            )
         except ImportError as e:
             print(f"FeishuChannel start error: {e}")
             return
@@ -84,19 +89,28 @@ class FeishuChannel(ABC):
         self._CreateMessageReactionRequestBody = CreateMessageReactionRequestBody
         self._CreateMessageRequest = CreateMessageRequest
         self._CreateMessageRequestBody = CreateMessageRequestBody
+        self._ReplyMessageRequest = ReplyMessageRequest
+        self._ReplyMessageRequestBody = ReplyMessageRequestBody
+        self._PatchMessageRequest = PatchMessageRequest
+        self._PatchMessageRequestBody = PatchMessageRequestBody
         self._Emoji = Emoji
 
         self._lark = lark
 
         app_id = self.config['app_id']
         app_secret = self.config['app_secret']
+
+        # 创建一个 API Client
+        self._api_client = lark.Client.builder().app_id(app_id).app_secret(app_secret).build()
         # 2、捕获当前主线程的时间循环，用于子线程跨线程提交协程使用
         # 子线程无法直接使用该 loop（asyncio 不是线程安全的），
         # 但可通过 run_coroutine_threadsafe() 向它安全地提交协程。
         self._main_loop = asyncio.get_event_loop()
 
-        # 创建一个 API Client
-        self._api_client = lark.Client.builder().app_id(app_id).app_secret(app_secret).build()
+        self._running = True
+        # 订阅出站消息回调
+        self.bus.subscribe_outbound(self._on_outbound)
+
         # 3、启动守护子线程，在子线程中运行WebSocket 客户端
         # daemon=True：主进程退出时，该子线程会自动被销毁，无需手动清理。
         self._thread = threading.Thread(target=self._run_ws, args=(app_id, app_secret), daemon=True)
@@ -198,26 +212,53 @@ class FeishuChannel(ABC):
         # 1、发送一个 "OK" 反应，确认消息已收到。
         rection_task = asyncio.create_task(self._add_reaction(msg_id, 'OK'))
         self._track_background_task(rection_task, name="add_reaction", msg_id=msg_id)
-        #
+        # 2、开启卡片消息回复任务
         self._ensure_running_card_started(msg_id)
+        await self.bus.publish_inbound(inbound)
 
-    def _ensure_running_card_started(self, msg_id: str, text: str) -> None:
-        """确保卡片消息回复
+    def _ensure_running_card_started(self, msg_id: str, text: str = "Working on it...") -> None:
+        """开启卡片消息回复任务
         """
+        # 1、检查是否已存在卡片消息 ID
         running_card_id = self._running_card_ids.get(msg_id, None)
         if running_card_id:
             # 已存在卡片消息 ID，无需重复回复。
             return None
 
-        # TODO
+        # 2、检查是否已存在卡片消息回复任务
+        running_card_task = self._running_card_tasks.get(msg_id)
+        if running_card_task:
+            return running_card_task
+
+        running_card_task = asyncio.create_task(
+            self._create_running_card(msg_id, text)
+        )
+
+        self._running_card_tasks[msg_id] = running_card_task
+        running_card_task.add_done_callback(lambda task, mid=msg_id: self._finalize_running_card_task(task, mid))
+        return running_card_task
+
+    async def _create_running_card(self, msg_id: str, text: str):
+        #
+        running_card_id = await self._reply_card(msg_id, text)
+        if running_card_id:
+            self._running_card_ids[msg_id] = running_card_id
+        return running_card_id
+
+    def _finalize_running_card_task(self, task: asyncio.Task, msg_id: str) -> None:
+        """卡片消息回复完成
+        """
+        if self._running_card_tasks.get(msg_id) is task:
+            self._running_card_tasks.pop(msg_id, None)
+        self._log_task_error(task, 'create_running_card', msg_id)
 
     async def _reply_card(self, msg_id: str, text: str) -> str | None:
         """回复卡片消息，返回回复消息 ID。
         https: // open.feishu.cn / document / server - docs / im - v1 / message / reply?appId = cli_a93e6e5177b99cd3
         """
-        content = self._create_card_content(text)
-        request = self._CreateMessageRequest.builder().message_id(msg_id) \
-            .request_body(self._CreateMessageRequestBody.builder()
+        content = self._build_card_content(text)
+        request = self._ReplyMessageRequest.builder().message_id(msg_id) \
+            .request_body(self._ReplyMessageRequestBody.builder()
                           .msg_type("interactive")  # 卡片
                           .content(content)
                           .reply_in_thread(True)  # true 时将以话题形式回复。
@@ -229,7 +270,7 @@ class FeishuChannel(ABC):
         return getattr(response_data, "message_id", None)
 
     @staticmethod
-    def _create_card_content(text: str) -> str:
+    def _build_card_content(text: str) -> str:
         """创建卡片消息内容
         https: // open.feishu.cn / document / feishu - cards / card - json - structure
         """
@@ -238,15 +279,15 @@ class FeishuChannel(ABC):
             "elements": [{"tag": "markdown", "content": text}],
         })
 
-    async def _track_background_task(self, task: asyncio.Task, name: str, msg_id: str) -> None:
+    def _track_background_task(self, task: asyncio.Task, *, name: str, msg_id: str) -> None:
         """追踪后台任务
         """
         # 记录任务，用于后续完成、取消时释放资源。
         self._background_tasks.add(task)
         # 为任务添加完成回调
-        task.add_done_callback(lambda task, name, mid=msg_id: self._background_task_done_callback(task, name, mid))
+        task.add_done_callback(lambda done_task, name=name, mid=msg_id: self._finalize_background_task(done_task, name, mid))
 
-    async def _background_task_done_callback(self, task: asyncio.Task, name: str, msg_id: str):
+    def _finalize_background_task(self, task: asyncio.Task, name: str, msg_id: str):
         """后台任务完成回调
         """
         # 任务完成时，从记录中移除它，释放资源。
@@ -268,7 +309,7 @@ class FeishuChannel(ABC):
 
     async def _add_reaction(self, msg_id: str, emoji_type: str = 'THUMBSUP') -> None:
         """通过飞书 REST API 给指定消息添加 Emoji 表情回应。
-        https: // open.feishu.cn / document / server - docs / im - v1 / message - reaction / create?appId = cli_a93e6e5177b99cd3
+        https://open.feishu.cn/document/server-docs/im-v1/message/create?appId=cli_a93e6e5177b99cd3
         """
         request = self._CreateMessageReactionRequest.builder().message_id(msg_id).request_body(
             self._CreateMessageReactionRequestBody.builder().reaction_type(
@@ -278,3 +319,76 @@ class FeishuChannel(ABC):
         # 直接在协程中调用会阻塞整个事件循环，导致其他任务无法执行。
         # asyncio.to_thread() 将其放入线程池执行，事件循环可继续处理其他任务。
         await asyncio.to_thread(self._api_client.im.v1.message_reaction.create, request)
+
+    async def _on_outbound(self, msg: OutboundMessage) -> None:
+        """处理出站消息回调
+        """
+        if msg.channel_name == self.name:
+            try:
+                await self.send(msg)
+            except Exception:
+                pass
+
+            # 其他任意附加数据， 例如：文件 TODO
+            # for attachment in msg.attachments:
+            #     try:
+            #         success = await self.send_file(msg, attachment)
+            #         if not success:
+            #             pass
+            #     except Exception:
+            #         pass
+
+    async def send(self, msg: OutboundMessage, *, _max_retries=3) -> None:
+        if not self._api_client:
+            return
+
+        last_exc: Exception | None = None
+        for attempt in range(_max_retries):
+            try:
+                await self._send_card_message(msg)
+                return
+            except Exception as exc:
+                logger.error(f"[FeishuChannel] 发送卡片消息异常: {exc}", exc_info=exc)
+                last_exc = exc
+                if attempt < _max_retries - 1:
+                    delay = 2**attempt
+                    await asyncio.sleep(delay)
+        raise last_exc
+
+    async def _send_card_message(self, msg: OutboundMessage) -> None:
+        msg_id = msg.thread_ts
+        if msg_id:
+            # 获取运行的卡片ID
+            running_card_id = self._running_card_ids.get(msg_id)
+            # awaited_running_card_task = False
+
+            if not running_card_id:
+                running_card_task = self._running_card_tasks.get(msg_id)
+                if running_card_task:
+                    # awaited_running_card_task = True
+                    running_card_id = await running_card_task
+
+            # 存在卡片ID，更新卡片内容
+            if running_card_id:
+                try:
+                    await self._update_card(running_card_id, msg.text)
+                except Exception:
+                    pass
+            elif msg.is_final:
+                # 流式输出：最后一条消息，创建卡片 TODO
+                await self._reply_card(msg_id, msg.text)
+
+            if msg.is_final:
+                self._running_card_ids.pop(msg_id, None)
+                await self._add_reaction(msg_id, "DONE")
+            return
+
+        # await self._create_card(msg)
+    async def _update_card(self, msg_id: str, text: str):
+        """更新卡片内容
+        """
+        content = self._build_card_content(text)
+        request = self._PatchMessageRequest.builder().message_id(msg_id).request_body(
+            self._PatchMessageRequestBody.builder().content(content).build()
+        ).build()
+        await asyncio.to_thread(self._api_client.im.v1.message.patch, request)
