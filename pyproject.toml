@@ -12,4 +12,5 @@ dependencies = [
     "langgraph-cli[inmem]>=0.4.18",
     "lark-oapi>=1.5.3",
     "python-socks>=2.8.1",
+    "sqlalchemy>=2.0.48",
 ]

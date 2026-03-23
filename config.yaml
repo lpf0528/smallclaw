@@ -1,3 +1,28 @@
+
+models:
+  - name: gpt-4
+    display_name: GPT-4
+    model: gpt-4o-mini
+    api_key: $OPENAI_API_KEY 
+    base_url: $OPENAI_API_BASE_URL
+    max_tokens: 6384
+    temperature: 0.7
+    supports_vision: true
+
+
+dbs:
+  - name: sqlite
+    path: ./smallclaw.db
+  - name: postgres
+    server: $POSTGRES_SERVER
+    db: $POSTGRES_DB
+    port: $POSTGRES_PORT
+    user: $POSTGRES_USER
+    password: $POSTGRES_PASSWORD # Change this to your pwd
+
+
+
+
 # client.runs.stream(
 #       thread_id, 
 #       assistant_id, -- session.assistant_id
@@ -19,14 +44,16 @@ channels:
   session: 
     assistant_id: lead_agent
     
-    # 所有移动端渠道共用的全局 session 默认值
+    # 所有agent共用的全局 session 默认值
     config:
       # 资源限制 
       recursion_limit: 100
     context:
-      # 上下文配置
+      # 开启思考模式
       thinking_enabled: true
+     # 启用TodoList中间件
       is_plan_mode: false
+      # 启用子代理委派。
       subagent_enabled: false
 
   feishu:
