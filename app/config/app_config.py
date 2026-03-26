@@ -4,10 +4,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Self, Any
-from model_config import ModelConfig
+from app.config.model_config import ModelConfig
 from dotenv import load_dotenv
-from db_config import load_db_config_from_dict, DbConfig
-
 load_dotenv()
 
 
@@ -17,7 +15,7 @@ class AppConfig(BaseModel):
     # (extra="allow":允许传入模型中未定义的额外字段。extra="ignore"：多余字段会被忽略，不保存到模型中)
     # (frozen=False:模型实例不是冻结的，可以修改字段值, frozen=True:模型实例是冻结的，不能修改字段值)
     model_config = ConfigDict(extra="allow", frozen=False)
-    dbs: list[DbConfig] = Field(default_factory=list, description="Database configuration")
+    # dbs: list[DbConfig] = Field(default_factory=list, description="Database configuration")
 
     @classmethod
     def get_config_path(cls) -> Path:
@@ -29,6 +27,10 @@ class AppConfig(BaseModel):
             if not path.exists():
                 raise FileNotFoundError("`config.yaml` 文件不存在")
         return path
+
+    def get_model_config(self, name: str) -> ModelConfig | None:
+
+        return next((model for model in self.models if model.name == name), None)
 
     @classmethod
     def resolve_env_variables(cls, config: Any) -> Any:
@@ -58,8 +60,8 @@ class AppConfig(BaseModel):
         #     load_memory_config_from_dict(config_data["memory"])
 
         # Load db config if present
-        if "dbs" in config_data:
-            load_db_config_from_dict(config_data["dbs"])
+        # if "dbs" in config_data:
+        #     load_db_config_from_dict(config_data["dbs"])
 
         result = cls.model_validate(config_data)
         return result
