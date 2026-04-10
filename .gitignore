@@ -10,3 +10,6 @@ wheels/
 .venv
 .env
 .vscode/
+.idea/
+.langgraph_api/
+.small-claw/
