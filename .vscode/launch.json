@@ -5,14 +5,14 @@
             "name": "LangGraph Dev",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/.venv/bin/langgraph",
+            "program": "${workspaceFolder}\\.venv\\Scripts\\langgraph.exe",
             "args": [
                 "dev",
                 // "--no-browser",
                 "--allow-blocking",
                 "--no-reload"
             ],
-            "python": "${workspaceFolder}/.venv/bin/python",
+            "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
             "justMyCode": false
         },
         {
