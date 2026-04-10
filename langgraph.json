@@ -6,6 +6,6 @@
     ],
     "env": ".env",
     "graphs": {
-        "lead_agent": "./app/lead_agent/agent.py:make_lead_agent"
+        "socra_agent": "./app/agents/socra_agent/builder.py:graph"
     }
 }

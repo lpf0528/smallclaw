@@ -3,7 +3,7 @@ from langchain.agents import create_agent
 
 from langchain_core.runnables import RunnableConfig
 from app.models.factory import create_chat_model
-from app.lead_agent.prompts.template import get_system_prompt_template
+from app.agents.prompts.template import get_system_prompt_template
 
 
 def make_lead_agent(config: RunnableConfig):
