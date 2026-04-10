@@ -3,7 +3,7 @@
 max-line-length = 88
 
 # 忽略的规则
-ignore = E501, E203, W503
+ignore = E501, E203, W503, F401
 
 # 排除的目录
 exclude = .git, __pycache__, build, dist, venv, .venv

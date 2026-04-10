@@ -7,7 +7,8 @@ from app.models.factory import create_chat_model
 from app.agents.socra_agent.tools import get_available_tools
 from app.agents.socra_agent.types import State
 from app.agents.prompts.template import get_system_prompt_template
-
+from app.agents.tools.simple_tools import direct_response_tool, ask_clarification_tool
+from app.agents.socra_agent.tools import recommended_related_test_questions_tool, generate_quiz_tool
 logger = logging.getLogger(__name__)
 
 
@@ -18,7 +19,12 @@ def coordinator_node(state: State, config: RunnableConfig) -> Command[Literal["_
     system_prompt = get_system_prompt_template("SOCRA_AGENT_SYSTEM_PROMPT", state)
 
     messages = [{"role": "system", "content": system_prompt}] + state["messages"]
-    tools = get_available_tools()
+    tools = [
+        direct_response_tool,
+        recommended_related_test_questions_tool,
+        ask_clarification_tool,
+        generate_quiz_tool,
+    ]
     agent = create_chat_model(
         model="gpt-4o-mini",
         system_prompt=system_prompt,

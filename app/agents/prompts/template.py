@@ -38,9 +38,8 @@ def get_system_prompt_template(
     prompt_name: str, state: AgentState | None = None, configurable: AppConfig | None = None, **kwargs
 ) -> str:
 
-    # Convert state to dict for template rendering
     state_vars = {
-        "CURRENT_TIME": datetime.now().strftime("%a %b %d %Y %H:%M:%S %z"),
+        # "CURRENT_TIME": datetime.now().strftime("%a %b %d %Y %H:%M:%S %z"),
         # **state,
     }
 
@@ -49,7 +48,7 @@ def get_system_prompt_template(
     state_vars.update(kwargs)
 
     try:
-        template = env.get_template(f"{prompt_name}.md")
+        template = env.get_template(prompt_name)
         system_prompt = template.render(**state_vars)
         return system_prompt
     except Exception as e:

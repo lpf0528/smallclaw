@@ -6,6 +6,6 @@
     ],
     "env": ".env",
     "graphs": {
-        "socra_agent": "./app/agents/socra_agent/builder.py:graph"
+        "nl2sql_agent": "./app/agents/nl2sql_agent/builder.py:make_nl2sql_agent"
     }
 }
